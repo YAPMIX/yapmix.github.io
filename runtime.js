@@ -142,8 +142,8 @@ document.addEventListener("DOMContentLoaded", () => {
             row.innerHTML = `
                 <th scope="row">${index + 1}</th>
                 <td>${escapeHtml(channel.name)}</td>
-                <td>Checking...</td>
-                <td>...</td>
+                <td>Online</td>
+                <td>Unchecked</td>
                 <td><a href="#" data-url="${channel.url}" class="play-link">▶️</a></td>
             `;
             const link = row.querySelector(".play-link");
@@ -153,15 +153,7 @@ document.addEventListener("DOMContentLoaded", () => {
             });
             tableBody.appendChild(row);
 
-            try {
-                const status = await checkChannelStatus(channel.url);
-                row.children[2].textContent = status.online ? "Online" : "Offline";
-                row.children[3].textContent = status.code;
-                if (status.online) actives.push(channel);
-            } catch (error) {
-                row.children[2].textContent = "Error";
-                row.children[3].textContent = "Network Error";
-            }
+            actives.push(channel);
 
             const percentage = Math.round(((index + 1) / totalChannels) * 100);
             scanIndicator.textContent = `Status: Scanning (${percentage}%)`;
@@ -174,33 +166,6 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         }
         return actives;
-    }
-
-    async function checkChannelStatus(url) {
-        const ctrl = new AbortController();
-        const timeout = setTimeout(() => ctrl.abort(), 5000);
-        try {
-            const resp = await fetch(url, {
-                method: "GET",
-                headers: { "Range": "bytes=0-1" },
-                signal: ctrl.signal
-            });
-            clearTimeout(timeout);
-
-            if (resp.type === "opaque") {
-                return { online: true, code: "CORS (opaque)" };
-            }
-
-            if (resp.ok) {
-                return { online: true, code: resp.status };
-            }
-
-            return { online: false, code: resp.status };
-        } catch (e) {
-            clearTimeout(timeout);
-            if (e.name === "AbortError") return { online: false, code: "Timeout" };
-            return { online: false, code: "Network Error" };
-        }
     }
 
     function createM3UContent(channels) {
