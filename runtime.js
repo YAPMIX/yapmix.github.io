@@ -183,14 +183,19 @@ document.addEventListener("DOMContentLoaded", () => {
             const resp = await fetch(url, {
                 method: "GET",
                 headers: { "Range": "bytes=0-1" },
-                mode: "no-cors",
                 signal: ctrl.signal
             });
             clearTimeout(timeout);
+
             if (resp.type === "opaque") {
-                return { online: true, code: "opaque" };
+                return { online: true, code: "CORS (opaque)" };
             }
-            return { online: resp.ok, code: resp.status };
+
+            if (resp.ok) {
+                return { online: true, code: resp.status };
+            }
+
+            return { online: false, code: resp.status };
         } catch (e) {
             clearTimeout(timeout);
             if (e.name === "AbortError") return { online: false, code: "Timeout" };
