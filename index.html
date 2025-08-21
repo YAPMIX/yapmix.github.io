@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>IPTV Playlist Checker</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; background: #f7f9fc; color: #333; }
+        h1 { text-align: center; padding: 20px; margin: 0; background: #263850; color: white; }
+        #controls { margin: 12px 20px; display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; align-items: center; }
+        input[type="file"], input[type="text"], textarea { padding: 8px; border: 1px solid #ccc; border-radius: 6px; }
+        button { padding: 8px 14px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; background: #263850; color: white; transition: background 0.3s; }
+        button:hover { background: #2980b9; }
+        button:disabled { background: black; cursor: not-allowed; }
+        textarea {width: calc(100% - 40px); height: 100px; resize: vertical; margin: 6px 20px; }
+        table { width: calc(100% - 40px); margin: 20px; border-collapse: collapse; background: white; box-shadow: 0 2px 6px rgba(0,0,0,0.1); }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: center; }
+        th {background: #263850;color: white;}
+        tr:hover { background: #f9f9f9; }
+        #scind { margin: 6px 20px; font-weight: bold; text-align: center; }
+        #player-container { width: 100%; max-width: 900px; margin: 20px auto; background: white; padding: 15px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); display: none; }
+        video { width: 100%; max-height: 520px; border-radius: 10px; background: black; }
+        #nav-buttons { margin-top: 10px; display: flex; justify-content: center; gap: 20px; }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+</head>
+<body>
+    <h1>📺 IPTV Playlist Checker</h1>
+    <div id="controls">
+        <input type="file" id="file" accept=".m3u" />
+        <input type="text" id="playlisturl" placeholder="Enter playlist URL" style="width:320px;" />
+        <button id="check">Check (File/URL)</button>
+        <button id="clear">Clear</button>
+        <button id="dl">Download Active</button>
+    </div>
+
+    <!-- textarea используется как "manual m3u" -->
+    <textarea id="manualm3u">#EXTM3U
+#EXTINF:-1, Example Online Channel
+https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8
+#EXTINF:-1, Example Offline Channel
+https://nonexistent-domain-iptv.test/stream.m3u8</textarea>
+
+    <div id="scind">Status: Ready / Waiting for file...</div>
+
+    <table>
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Name</th>
+                <th>Status</th>
+                <th>Code</th>
+                <th>Play</th>
+            </tr>
+        </thead>
+        <tbody></tbody>
+    </table>
+
+    <div id="player-container">
+        <h3>▶️ Now Playing: <span id="current-channel-name"></span></h3>
+        <video id="video-player" controls autoplay></video>
+        <div id="nav-buttons">
+            <button id="prev">⏮ Prev</button>
+            <button id="next">⏭ Next</button>
+        </div>
+    </div>
+
+    <!-- фикс: подключаем скрипт правильно -->
+    <script>
+        // переносим содержимое textarea в глобальную переменную
+        window._manualM3U = document.getElementById("manualm3u").value;
+    </script>
+    <script>
+	document.addEventListener("DOMContentLoaded", () => {
+    let controller = new AbortController();
+    const checkButton = document.getElementById("check");
+    const clearButton = document.getElementById("clear");
+    const downloadButton = document.getElementById("dl");
+    const fileInput = document.getElementById("file");
+    const urlInput = document.getElementById("playlisturl");
+    const tableBody = document.querySelector("tbody");
+    const scanIndicator = document.getElementById("scind");
+
+    window._activeChannels = [];
+    let totalChannels = 0;
+    let hlsInstance = null;
+
+    downloadButton.disabled = true;
+
+    checkButton.addEventListener("click", async (event) => {
+        event.preventDefault();
+        tableBody.innerHTML = "";
+        window._activeChannels = [];
+        let playlistContent = "";
+
+        if (urlInput.value) {
+            playlistContent = await fetchM3UFromURL(urlInput.value);
+        } else if (fileInput.files.length > 0) {
+            playlistContent = await readM3UFile(fileInput.files[0]);
+        } else if (window._manualM3U) {
+            playlistContent = window._manualM3U;
+        } else {
+            scanIndicator.textContent = "Error: No Playlist Detected, Try again";
+            return;
+        }
+
+        if (playlistContent) {
+            const channels = parseM3U(playlistContent);
+            if (channels.length === 0) {
+                scanIndicator.textContent = "Error: Playlist is empty or invalid.";
+                resetButtons();
+                return;
+            }
+            totalChannels = channels.length;
+            scanIndicator.textContent = "Status: Scanning (0%)";
+            const actives = await checkChannels(channels);
+            if (!controller.signal.aborted) {
+                window._activeChannels = actives;
+                scanIndicator.textContent = `Status: Done. Active: ${actives.length}/${channels.length}`;
+                downloadButton.disabled = actives.length === 0;
+                clearButton.disabled = false;
+                checkButton.disabled = false;
+            }
+        }
+    });
+
+    clearButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        controller.abort();
+        resetUI();
+    });
+
+    downloadButton.addEventListener("click", () => {
+        if (window._activeChannels.length === 0) {
+            scanIndicator.textContent = "Error: No active channels to download. Please run a check first.";
+            return;
+        }
+        downloadActiveChannels();
+    });
+
+    function resetUI() {
+        tableBody.innerHTML = "";
+        fileInput.value = "";
+        urlInput.value = "";
+        window._activeChannels = [];
+        scanIndicator.textContent = "Status: Ready / Waiting for file...";
+        downloadButton.disabled = true;
+        resetButtons();
+        controller = new AbortController();
+    }
+
+    function resetButtons() {
+        checkButton.disabled = false;
+        clearButton.disabled = false;
+    }
+
+    async function fetchM3UFromURL(url) {
+        try {
+            const response = await fetch(url, { signal: controller.signal });
+            if (!response.ok) throw new Error(`Failed to fetch: ${response.status}`);
+            return await response.text();
+        } catch (error) {
+            scanIndicator.textContent = "Error: fetching the M3U file.";
+            console.error(error);
+            resetButtons();
+            return "";
+        }
+    }
+
+    function readM3UFile(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = (event) => resolve(event.target.result);
+            reader.onerror = (error) => {
+                scanIndicator.textContent = "Error: reading the file.";
+                console.error(error);
+                resetButtons();
+                reject("");
+            };
+            reader.readAsText(file);
+        });
+    }
+
+    function parseM3U(content) {
+        const lines = content.replace(/\r\n/g, "\n").split("\n");
+        const channels = [];
+        let channelInfo = {};
+
+        for (const raw of lines) {
+            const line = raw.trim();
+            if (!line) continue;
+
+            if (line.startsWith("#EXTINF")) {
+                const nameMatch = line.match(/,(.*)$/);
+                channelInfo.name = nameMatch ? nameMatch[1].trim() : "Unknown Channel";
+                channelInfo.meta = line;
+            } else if (/^(https?|rtmp|rtsp):\/\//i.test(line)) {
+                channelInfo.url = line;
+                if (!channelInfo.name) channelInfo.name = line;
+                channels.push({ ...channelInfo });
+                channelInfo = {};
+            }
+        }
+        return channels;
+    }
+
+    async function checkChannels(channels) {
+        const actives = [];
+
+        for (const [index, channel] of channels.entries()) {
+            checkButton.disabled = true;
+            clearButton.disabled = true;
+
+            const row = document.createElement("tr");
+            row.innerHTML = `
+                <th scope="row">${index + 1}</th>
+                <td>${escapeHtml(channel.name)}</td>
+                <td>Checking...</td>
+                <td>...</td>
+                <td><a href="#" data-url="${channel.url}" class="play-link">▶️</a></td>
+            `;
+            const link = row.querySelector(".play-link");
+            link.addEventListener("click", (e) => {
+                e.preventDefault();
+                playChannel(channel.url, channel.name);
+            });
+            tableBody.appendChild(row);
+
+            try {
+                const status = await checkChannelStatus(channel.url);
+                row.children[2].textContent = status.online ? "Online" : "Offline";
+                row.children[3].textContent = status.code;
+                if (status.online) actives.push(channel);
+            } catch (error) {
+                row.children[2].textContent = "Error";
+                row.children[3].textContent = "Network Error";
+            }
+
+            const percentage = Math.round(((index + 1) / totalChannels) * 100);
+            scanIndicator.textContent = `Status: Scanning (${percentage}%)`;
+
+            if (controller.signal.aborted) {
+                scanIndicator.textContent = "Status: Scan aborted.";
+                downloadButton.disabled = true;
+                resetButtons();
+                break;
+            }
+        }
+        return actives;
+    }
+
+    async function checkChannelStatus(url) {
+        const ctrl = new AbortController();
+        const timeout = setTimeout(() => ctrl.abort(), 5000);
+        try {
+            const resp = await fetch(url, {
+                method: "GET",
+                headers: { "Range": "bytes=0-1" },
+                mode: "no-cors",
+                signal: ctrl.signal
+            });
+            clearTimeout(timeout);
+            if (resp.type === "opaque") {
+                return { online: true, code: "opaque" };
+            }
+            return { online: resp.ok, code: resp.status };
+        } catch (e) {
+            clearTimeout(timeout);
+            if (e.name === "AbortError") return { online: false, code: "Timeout" };
+            return { online: false, code: "Network Error" };
+        }
+    }
+
+    function createM3UContent(channels) {
+        let content = "#EXTM3U\n";
+        channels.forEach((channel) => {
+            if (channel.meta) {
+                content += `${channel.meta}\n${channel.url}\n`;
+            } else {
+                content += `#EXTINF:-1,${channel.name}\n${channel.url}\n`;
+            }
+        });
+        return content;
+    }
+
+    function downloadActiveChannels() {
+        const content = createM3UContent(window._activeChannels);
+        const d = new Date();
+        const blob = new Blob([content], { type: "text/plain" });
+        const url = URL.createObjectURL(blob);
+
+        const downloadLink = document.createElement("a");
+        downloadLink.href = url;
+        downloadLink.download = `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}-active.m3u`;
+        document.body.appendChild(downloadLink);
+        downloadLink.click();
+        document.body.removeChild(downloadLink);
+
+        URL.revokeObjectURL(url);
+    }
+
+    function playChannel(url, name = "") {
+        const playerContainer = document.getElementById("player-container");
+        const nameSpan = document.getElementById("current-channel-name");
+        const videoPlayer = document.getElementById("video-player");
+        if (!videoPlayer) return;
+
+        if (nameSpan && name) nameSpan.textContent = name;
+
+        if (hlsInstance) {
+            try { hlsInstance.destroy(); } catch(_) {}
+            hlsInstance = null;
+        }
+
+        if (window.Hls && window.Hls.isSupported()) {
+            hlsInstance = new window.Hls();
+            hlsInstance.loadSource(url);
+            hlsInstance.attachMedia(videoPlayer);
+            hlsInstance.on(window.Hls.Events.MANIFEST_PARSED, function () {
+                videoPlayer.play().catch(()=>{});
+            });
+        } else if (videoPlayer.canPlayType("application/vnd.apple.mpegurl")) {
+            videoPlayer.src = url;
+            videoPlayer.play().catch(()=>{});
+        } else {
+            alert("Your browser cannot play HLS streams.");
+        }
+        if (playerContainer) playerContainer.style.display = "block";
+    }
+
+    function escapeHtml(str) {
+        return String(str)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#039;");
+    }
+});
+	</script>
+
+    <script>
+        let currentIndex = -1;
+        let currentChannels = [];
+
+        function playChannelWithNavigation(channel, index) {
+            currentIndex = index;
+            currentChannels = window._activeChannels || [];
+            const channelNameSpan = document.getElementById("current-channel-name");
+            if (channelNameSpan) channelNameSpan.textContent = channel.name || "";
+            const videoPlayer = document.getElementById("video-player");
+            const playerContainer = document.getElementById("player-container");
+
+            if (window.Hls && window.Hls.isSupported()) {
+                const hls = new window.Hls();
+                hls.loadSource(channel.url);
+                hls.attachMedia(videoPlayer);
+                hls.on(window.Hls.Events.MANIFEST_PARSED, function () {
+                    videoPlayer.play().catch(()=>{});
+                });
+            } else if (videoPlayer.canPlayType("application/vnd.apple.mpegurl")) {
+                videoPlayer.src = channel.url;
+                videoPlayer.play().catch(()=>{});
+            } else {
+                alert("Your browser cannot play HLS streams.");
+            }
+            if (playerContainer) playerContainer.style.display = "block";
+        }
+
+        document.addEventListener("DOMContentLoaded", () => {
+            document.getElementById("prev").addEventListener("click", () => {
+                if (currentChannels.length > 0 && currentIndex > 0) {
+                    playChannelWithNavigation(currentChannels[currentIndex - 1], currentIndex - 1);
+                }
+            });
+
+            document.getElementById("next").addEventListener("click", () => {
+                if (currentChannels.length > 0 && currentIndex < currentChannels.length - 1) {
+                    playChannelWithNavigation(currentChannels[currentIndex + 1], currentIndex + 1);
+                }
+            });
+        });
+    </script>
+</body>
+</html>
