@@ -181,7 +181,6 @@ document.addEventListener("DOMContentLoaded", () => {
         return content;
     }
 
-    // закрыть плеер
     document.getElementById("close-player").addEventListener("click", () => {
         const playerContainer = document.getElementById("player-container");
         const player = document.getElementById("iptv-player");
